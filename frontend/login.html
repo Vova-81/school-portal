@@ -149,7 +149,7 @@
     </div>
 
     <script>
-        const API_BASE_URL = 'http://localhost:3000';
+        const API_BASE_URL = '';
 
 document.addEventListener('DOMContentLoaded', function() {
     // Проверяем, нужно ли создавать первого администратора
@@ -203,9 +203,9 @@ document.addEventListener('DOMContentLoaded', function() {
         submitBtn.disabled = true;
         
         try {
-            console.log('📨 Отправляю POST запрос на', `${API_BASE_URL}/api/auth/login`);
+            console.log('📨 Отправляю POST запрос на', `${API_BASE_URL}https://backend-school-portal.onrender.com/api/auth/login`);
             
-            const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+            const response = await fetch(`${API_BASE_URL}https://backend-school-portal.onrender.com/api/auth/login`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -282,7 +282,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // Проверка, нужно ли создавать первого администратора
 async function checkIfSetupNeeded() {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/setup/check`);
+        const response = await fetch(`${API_BASE_URL}https://backend-school-portal.onrender.com/api/setup/check`);
         const data = await response.json();
         
         if (data.needsSetup) {
@@ -431,7 +431,7 @@ async function createFirstAdmin() {
     createBtn.disabled = true;
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/setup/first-admin`, {
+        const response = await fetch(`${API_BASE_URL}https://backend-school-portal.onrender.com/api/setup/first-admin`, {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json',
@@ -519,7 +519,7 @@ function fillDemo(role) {
 // Проверка сервера
 async function checkServer() {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/health`);
+        const response = await fetch(`${API_BASE_URL}https://backend-school-portal.onrender.com/api/health`);
         if (response.ok) {
             console.log('✅ Сервер доступен');
         } else {

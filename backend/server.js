@@ -1,563 +1,714 @@
+// ========== ЗАГРУЗКА ЗАВИСИМОСТЕЙ ==========
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'school-portal-secret-2024';
+const FRONTEND_PATH = path.join(__dirname, '..', 'frontend');
 
 // ========== БАЗОВЫЕ НАСТРОЙКИ ==========
 app.use(cors());
 app.use(express.json());
 
-// ========== СТАТИЧЕСКИЕ ФАЙЛЫ ==========
-const FRONTEND_PATH = path.join(__dirname, '..', 'frontend');
-console.log('📁 Путь к фронтенду:', FRONTEND_PATH);
+// ========== ПОДКЛЮЧЕНИЕ БАЗЫ ДАННЫХ ==========
+let db;
+let isDatabaseConnected = false;
 
-app.use(express.static(FRONTEND_PATH));
-
-// ========== ПУСТЫЕ МАССИВЫ ДАННЫХ ==========
-let users = [];
-let announcements = [];
-let schedules = [];
-
-// ========== МИДЛВЭР ДЛЯ ЛОГИРОВАНИЯ ==========
-app.use((req, res, next) => {
-    console.log(`📨 ${req.method} ${req.path}`, req.body || '');
-    next();
-});
-
-// ========== API ДЛЯ ПРОВЕРКИ СЕРВЕРА ==========
-app.get('/api/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        message: 'Сервер работает',
-        hasUsers: users.length > 0,
-        timestamp: new Date().toISOString()
-    });
-});
-
-// ========== API ДЛЯ ПРОВЕРКИ, НУЖЕН ЛИ ПЕРВЫЙ АДМИН ==========
-app.get('/api/setup/check', (req, res) => {
-    res.json({ 
-        needsSetup: users.length === 0,
-        message: users.length === 0 ? 'Требуется создание первого администратора' : 'Система настроена'
-    });
-});
-
-// ========== API АВТОРИЗАЦИИ ==========
-app.post('/api/auth/login', (req, res) => {
-    const { username, password } = req.body;
-    
-    if (!username || !password) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Введите логин и пароль' 
+async function initializeDatabase() {
+    try {
+        const { Pool } = require('pg');
+        db = new Pool({
+            connectionString: process.env.DATABASE_URL,
+            ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
         });
+        
+        // Проверка подключения
+        await db.query('SELECT NOW()');
+        console.log('✅ Database connected successfully');
+        isDatabaseConnected = true;
+        
+        // Автоматическое создание таблиц при запуске
+        await createTablesIfNotExist();
+        
+    } catch (error) {
+        console.error('❌ Database connection error:', error.message);
+        db = null;
+        isDatabaseConnected = false;
     }
-    
-    const user = users.find(u => u.username === username);
-    if (!user) {
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Неверный логин или пароль' 
-        });
-    }
-    
-    if (user.password !== password) {
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Неверный логин или пароль' 
-        });
-    }
-    
-    user.last_login = new Date().toISOString();
-    
-    const token = `token-${user.id}-${Date.now()}`;
-    
-    const { password: _, ...userWithoutPassword } = user;
-    
-    res.json({
-        success: true,
-        token,
-        user: userWithoutPassword
-    });
-});
+}
 
-// ========== СОЗДАНИЕ ПЕРВОГО АДМИНИСТРАТОРА ==========
-app.post('/api/setup/first-admin', (req, res) => {
-    if (users.length > 0) {
-        return res.status(400).json({
-            success: false,
-            error: 'Администратор уже создан'
-        });
+async function createTablesIfNotExist() {
+    try {
+        // Таблица пользователей
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                full_name VARCHAR(100) NOT NULL,
+                role VARCHAR(20) DEFAULT 'teacher',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP
+            )
+        `);
+        console.log('✅ Users table checked/created');
+        
+        // Таблица объявлений
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS announcements (
+                id SERIAL PRIMARY KEY,
+                title VARCHAR(200) NOT NULL,
+                content TEXT NOT NULL,
+                category VARCHAR(50) DEFAULT 'all',
+                type VARCHAR(50) DEFAULT 'announcement',
+                author VARCHAR(100) NOT NULL,
+                pinned BOOLEAN DEFAULT FALSE,
+                urgent BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Announcements table checked/created');
+        
+        // Таблица расписания
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS schedules (
+                id SERIAL PRIMARY KEY,
+                class_number INTEGER NOT NULL,
+                class_letter VARCHAR(5) NOT NULL,
+                day_of_week VARCHAR(20) NOT NULL,
+                start_time TIME NOT NULL,
+                end_time TIME NOT NULL,
+                subject VARCHAR(100) NOT NULL,
+                teacher VARCHAR(100) NOT NULL,
+                room VARCHAR(20),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        console.log('✅ Schedules table checked/created');
+        
+    } catch (error) {
+        console.error('❌ Error creating tables:', error.message);
     }
-    
-    const { username, password, full_name } = req.body;
-    
-    if (!username || !password || !full_name) {
-        return res.status(400).json({
-            success: false,
-            error: 'Заполните все поля'
-        });
-    }
-    
-    if (password.length < 6) {
-        return res.status(400).json({
-            success: false,
-            error: 'Пароль должен быть не менее 6 символов'
-        });
-    }
-    
-    const firstAdmin = {
-        id: 1,
-        username,
-        full_name,
-        role: 'director',
-        password,
-        created_at: new Date().toISOString(),
-        last_login: null
-    };
-    
-    users.push(firstAdmin);
-    
-    const { password: _, ...adminWithoutPassword } = firstAdmin;
-    
-    res.json({
-        success: true,
-        message: 'Первый администратор создан успешно',
-        user: adminWithoutPassword
-    });
-});
+}
 
-// ========== МИДЛВЭР ДЛЯ ПРОВЕРКИ АВТОРИЗАЦИИ ==========
+// Инициализируем базу данных при старте
+initializeDatabase();
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 const requireAuth = (req, res, next) => {
-    console.log('🔐 Проверка авторизации для:', req.path);
-    
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader) {
-        console.log('❌ Нет заголовка Authorization');
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Требуется авторизация. Пожалуйста, войдите в систему.' 
-        });
-    }
-    
-    // Удаляем "Bearer " если есть
-    const token = authHeader.replace('Bearer ', '');
-    
-    console.log('📝 Полученный токен:', token.substring(0, 20) + '...');
-    
-    if (!token.startsWith('token-')) {
-        console.log('❌ Неверный формат токена');
-        return res.status(401).json({ 
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader) {
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Требуется авторизация' 
+            });
+        }
+        
+        const token = authHeader.replace('Bearer ', '');
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.userId = decoded.id;
+        req.userRole = decoded.role;
+        next();
+    } catch (error) {
+        res.status(401).json({ 
             success: false, 
             error: 'Неверный токен' 
         });
     }
-    
-    const tokenParts = token.split('-');
-    if (tokenParts.length < 3) {
-        console.log('❌ Токен поврежден');
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Токен поврежден' 
+};
+
+const checkDatabase = (req, res, next) => {
+    if (!isDatabaseConnected || !db) {
+        return res.status(503).json({
+            success: false,
+            error: 'База данных недоступна. Попробуйте позже.'
         });
     }
-    
-    const userId = parseInt(tokenParts[1]);
-    const user = users.find(u => u.id === userId);
-    
-    if (!user) {
-        console.log('❌ Пользователь не найден по токену, ID:', userId);
-        return res.status(401).json({ 
-            success: false, 
-            error: 'Пользователь не найден' 
-        });
-    }
-    
-    // Проверяем роль (только director или deputy могут в админку)
-    if (!['director', 'deputy'].includes(user.role)) {
-        console.log('❌ Недостаточно прав, роль:', user.role);
-        return res.status(403).json({ 
-            success: false, 
-            error: 'Недостаточно прав' 
-        });
-    }
-    
-    console.log('✅ Авторизация успешна для:', user.username, 'роль:', user.role);
-    
-    req.user = user;
     next();
 };
 
-// ========== API АДМИНИСТРАТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ ==========
-app.get('/api/admin/users', requireAuth, (req, res) => {
-    console.log('👥 GET /api/admin/users - запрос от:', req.user.username);
-    
-    const usersWithoutPasswords = users.map(user => {
-        const { password, ...userWithoutPassword } = user;
-        return userWithoutPassword;
-    });
-    
-    res.json({ 
-        success: true, 
-        users: usersWithoutPasswords 
-    });
-});
+// ========== API МАРШРУТЫ ==========
 
-app.post('/api/admin/users', requireAuth, (req, res) => {
-    console.log('➕ POST /api/admin/users - запрос от:', req.user.username);
-    
-    const { username, password, full_name, role } = req.body;
-    
-    if (!username || !password || !full_name || !role) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Заполните все поля' 
+// 1. ПРОВЕРКА СЕРВЕРА И БД
+app.get('/api/health', async (req, res) => {
+    try {
+        let dbStatus = { connected: isDatabaseConnected };
+        
+        if (isDatabaseConnected && db) {
+            try {
+                const result = await db.query('SELECT NOW() as time');
+                dbStatus.time = result.rows[0].time;
+                
+                // Проверяем существование таблиц
+                const tables = await db.query(`
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public'
+                `); 
+                dbStatus.tables = tables.rows.map(row => row.table_name);
+                
+            } catch (dbError) {
+                dbStatus.error = dbError.message;
+            }
+        } else {
+            dbStatus.error = 'Database not connected';
+        }
+        
+        res.json({
+            success: true,
+            status: 'OK',
+            message: 'Сервер работает',
+            timestamp: new Date().toISOString(),
+            database: dbStatus,
+            environment: process.env.NODE_ENV || 'development',
+            port: PORT
         });
-    }
-    
-    if (!['director', 'deputy'].includes(role)) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Недопустимая роль' 
-        });
-    }
-    
-    if (users.find(u => u.username === username)) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Логин уже занят' 
-        });
-    }
-    
-    const newId = users.length > 0 ? Math.max(...users.map(u => u.id)) + 1 : 1;
-    
-    const newUser = {
-        id: newId,
-        username,
-        full_name,
-        role,
-        password,
-        created_at: new Date().toISOString(),
-        last_login: null
-    };
-    
-    users.push(newUser);
-    
-    const { password: _, ...userWithoutPassword } = newUser;
-    
-    res.json({ 
-        success: true, 
-        user: userWithoutPassword 
-    });
-});
-
-app.put('/api/admin/users/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    const { full_name, role } = req.body;
-    
-    const userIndex = users.findIndex(u => u.id == id);
-    if (userIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Пользователь не найден' 
-        });
-    }
-    
-    users[userIndex].full_name = full_name;
-    users[userIndex].role = role;
-    
-    const { password: _, ...userWithoutPassword } = users[userIndex];
-    
-    res.json({ 
-        success: true, 
-        user: userWithoutPassword 
-    });
-});
-
-app.post('/api/admin/users/:id/reset-password', requireAuth, (req, res) => {
-    const { id } = req.params;
-    const { newPassword } = req.body;
-    
-    const user = users.find(u => u.id == id);
-    if (!user) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Пользователь не найден' 
-        });
-    }
-    
-    if (newPassword.length < 6) {
-        return res.status(400).json({
+    } catch (error) {
+        res.status(500).json({
             success: false,
-            error: 'Пароль должен быть не менее 6 символов'
+            error: error.message
         });
     }
-    
-    user.password = newPassword;
-    
-    res.json({ 
-        success: true, 
-        message: 'Пароль успешно изменен'
+});
+
+// 2. ПРОВЕРКА НУЖЕН ЛИ ПЕРВЫЙ АДМИН
+app.get('/api/setup/check', checkDatabase, async (req, res) => {
+    try {
+        // Проверяем есть ли пользователи
+        const result = await db.query('SELECT COUNT(*) as count FROM users');
+        const count = parseInt(result.rows[0].count);
+        
+        res.json({
+            success: true,
+            needsSetup: count === 0,
+            message: count === 0 ? 'Требуется создание первого администратора' : 'Система настроена',
+            userCount: count
+        });
+    } catch (error) {
+        console.error('Setup check error:', error);
+        res.json({
+            success: true,
+            needsSetup: true,
+            message: 'Проверьте настройку базы данных'
+        });
+    }
+});
+
+// 3. СОЗДАНИЕ ПЕРВОГО АДМИНА
+app.post('/api/setup/first-admin', checkDatabase, async (req, res) => {
+    try {
+        const { username, password, full_name } = req.body;
+        
+        if (!username || !password || !full_name) {
+            return res.status(400).json({
+                success: false,
+                error: 'Заполните все поля'
+            });
+        }
+        
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                error: 'Пароль должен быть не менее 6 символов'
+            });
+        }
+        
+        // Проверяем есть ли уже пользователи
+        const checkResult = await db.query('SELECT COUNT(*) as count FROM users');
+        if (parseInt(checkResult.rows[0].count) > 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Администратор уже создан'
+            });
+        }
+        
+        // Хешируем пароль
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Создаем первого админа
+        const result = await db.query(
+            `INSERT INTO users (username, password, full_name, role) 
+             VALUES ($1, $2, $3, 'director') 
+             RETURNING id, username, full_name, role, created_at`,
+            [username, hashedPassword, full_name]
+        );
+        
+        res.json({
+            success: true,
+            message: 'Первый администратор создан успешно',
+            user: result.rows[0]
+        });
+        
+    } catch (error) {
+        console.error('First admin error:', error);
+        
+        // Если ошибка дублирования username
+        if (error.code === '23505') {
+            return res.status(400).json({
+                success: false,
+                error: 'Пользователь с таким логином уже существует'
+            });
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка сервера: ' + error.message
+        });
+    }
+});
+
+// 4. ВХОД В СИСТЕМУ
+app.post('/api/auth/login', checkDatabase, async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        
+        if (!username || !password) {
+            return res.status(400).json({
+                success: false,
+                error: 'Введите логин и пароль'
+            });
+        }
+        
+        const result = await db.query(
+            'SELECT * FROM users WHERE username = $1',
+            [username]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({
+                success: false,
+                error: 'Неверный логин или пароль'
+            });
+        }
+        
+        const user = result.rows[0];
+        
+        // Проверяем пароль
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        if (!isValidPassword) {
+            return res.status(401).json({
+                success: false,
+                error: 'Неверный логин или пароль'
+            });
+        }
+        
+        // Обновляем время последнего входа
+        await db.query(
+            'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1',
+            [user.id]
+        );
+        
+        // Создаем JWT токен
+        const token = jwt.sign(
+            { 
+                id: user.id, 
+                username: user.username, 
+                role: user.role 
+            },
+            JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        // Убираем пароль из ответа
+        const { password: _, ...userWithoutPassword } = user;
+        
+        res.json({
+            success: true,
+            token,
+            user: userWithoutPassword,
+            expiresIn: '24h'
+        });
+        
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка входа: ' + error.message
+        });
+    }
+});
+
+// 5. ПОЛУЧИТЬ ВСЕ ОБЪЯВЛЕНИЯ
+app.get('/api/announcements', checkDatabase, async (req, res) => {
+    try {
+        const result = await db.query(
+            'SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC'
+        );
+        
+        res.json({
+            success: true,
+            announcements: result.rows
+        });
+    } catch (error) {
+        console.error('Get announcements error:', error);
+        
+        // Если таблицы нет, создаем ее и возвращаем пустой массив
+        if (error.code === '42P01') {
+            try {
+                await createTablesIfNotExist();
+                return res.json({
+                    success: true,
+                    announcements: []
+                });
+            } catch (createError) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Ошибка инициализации базы данных'
+                });
+            }
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка получения объявлений'
+        });
+    }
+});
+
+// 6. СОЗДАТЬ ОБЪЯВЛЕНИЕ
+app.post('/api/announcements', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        const { title, content, category, type, pinned, urgent } = req.body;
+        
+        if (!title || !content) {
+            return res.status(400).json({
+                success: false,
+                error: 'Заполните заголовок и содержание'
+            });
+        }
+        
+        // Получаем пользователя для имени автора
+        const userResult = await db.query(
+            'SELECT full_name FROM users WHERE id = $1',
+            [req.userId]
+        );
+        
+        const author = userResult.rows[0]?.full_name || 'Администратор';
+        
+        const result = await db.query(
+            `INSERT INTO announcements (title, content, category, type, author, pinned, urgent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *`,
+            [
+                title.trim(),
+                content.trim(),
+                category || 'all',
+                type || 'announcement',
+                author,
+                Boolean(pinned),
+                Boolean(urgent)
+            ]
+        );
+        
+        res.json({
+            success: true,
+            announcement: result.rows[0]
+        });
+        
+    } catch (error) {
+        console.error('Create announcement error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка создания объявления'
+        });
+    }
+});
+
+// 7. ПОЛУЧИТЬ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ (админ)
+app.get('/api/admin/users', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        if (!['director', 'deputy'].includes(req.userRole)) {
+            return res.status(403).json({
+                success: false,
+                error: 'Недостаточно прав'
+            });
+        }
+        
+        const result = await db.query(
+            'SELECT id, username, full_name, role, created_at, last_login FROM users ORDER BY id'
+        );
+        
+        res.json({
+            success: true,
+            users: result.rows
+        });
+    } catch (error) {
+        console.error('Get users error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка получения пользователей'
+        });
+    }
+});
+
+// 8. ПОЛУЧИТЬ РАСПИСАНИЕ
+app.get('/api/schedules', checkDatabase, async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT * FROM schedules 
+             ORDER BY class_number, class_letter, 
+             CASE day_of_week 
+                 WHEN 'Понедельник' THEN 1
+                 WHEN 'Вторник' THEN 2
+                 WHEN 'Среда' THEN 3
+                 WHEN 'Четверг' THEN 4
+                 WHEN 'Пятница' THEN 5
+                 WHEN 'Суббота' THEN 6
+                 ELSE 7
+             END, start_time`
+        );
+        
+        res.json({
+            success: true,
+            schedules: result.rows
+        });
+    } catch (error) {
+        console.error('Get schedules error:', error);
+        
+        // Если таблицы нет, создаем ее и возвращаем пустой массив
+        if (error.code === '42P01') {
+            try {
+                await createTablesIfNotExist();
+                return res.json({
+                    success: true,
+                    schedules: []
+                });
+            } catch (createError) {
+                return res.status(500).json({
+                    success: false,
+                    error: 'Ошибка инициализации базы данных'
+                });
+            }
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка получения расписания'
+        });
+    }
+});
+
+// 9. СОЗДАТЬ УРОК
+app.post('/api/schedules', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        const { class_number, class_letter, day_of_week, start_time, end_time, subject, teacher, room } = req.body;
+        
+        if (!class_number || !class_letter || !day_of_week || !start_time || !end_time || !subject || !teacher) {
+            return res.status(400).json({
+                success: false,
+                error: 'Заполните все обязательные поля'
+            });
+        }
+        
+        const result = await db.query(
+            `INSERT INTO schedules (class_number, class_letter, day_of_week, start_time, end_time, subject, teacher, room)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [
+                parseInt(class_number),
+                class_letter.trim(),
+                day_of_week.trim(),
+                start_time.includes(':') ? start_time : start_time + ':00',
+                end_time.includes(':') ? end_time : end_time + ':00',
+                subject.trim(),
+                teacher.trim(),
+                room ? room.trim() : ''
+            ]
+        );
+        
+        res.json({
+            success: true,
+            schedule: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Create schedule error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка создания урока'
+        });
+    }
+});
+
+// 10. УДАЛИТЬ ОБЪЯВЛЕНИЕ
+app.delete('/api/announcements/:id', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await db.query(
+            'DELETE FROM announcements WHERE id = $1 RETURNING *',
+            [id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Объявление не найдено'
+            });
+        }
+        
+        res.json({
+            success: true,
+            message: 'Объявление удалено'
+        });
+        
+    } catch (error) {
+        console.error('Delete announcement error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка удаления объявления'
+        });
+    }
+});
+
+// 11. УДАЛИТЬ УРОК
+app.delete('/api/schedules/:id', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await db.query(
+            'DELETE FROM schedules WHERE id = $1 RETURNING *',
+            [id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Урок не найден'
+            });
+        }
+        
+        res.json({
+            success: true,
+            message: 'Урок удален'
+        });
+        
+    } catch (error) {
+        console.error('Delete schedule error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка удаления урока'
+        });
+    }
+});
+
+// 12. ДОБАВИТЬ НОВОГО ПОЛЬЗОВАТЕЛЯ (админ)
+app.post('/api/admin/users', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        if (!['director', 'deputy'].includes(req.userRole)) {
+            return res.status(403).json({
+                success: false,
+                error: 'Недостаточно прав'
+            });
+        }
+        
+        const { username, password, full_name, role } = req.body;
+        
+        if (!username || !password || !full_name || !role) {
+            return res.status(400).json({
+                success: false,
+                error: 'Заполните все поля'
+            });
+        }
+        
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                error: 'Пароль должен быть не менее 6 символов'
+            });
+        }
+        
+        // Хешируем пароль
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const result = await db.query(
+            `INSERT INTO users (username, password, full_name, role) 
+             VALUES ($1, $2, $3, $4) 
+             RETURNING id, username, full_name, role, created_at`,
+            [username, hashedPassword, full_name, role]
+        );
+        
+        res.json({
+            success: true,
+            message: 'Пользователь создан успешно',
+            user: result.rows[0]
+        });
+        
+    } catch (error) {
+        console.error('Create user error:', error);
+        
+        // Если ошибка дублирования username
+        if (error.code === '23505') {
+            return res.status(400).json({
+                success: false,
+                error: 'Пользователь с таким логином уже существует'
+            });
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка создания пользователя'
+        });
+    }
+});
+
+// 13. ПОЛУЧИТЬ ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ
+app.get('/api/auth/profile', checkDatabase, requireAuth, async (req, res) => {
+    try {
+        const result = await db.query(
+            'SELECT id, username, full_name, role, created_at, last_login FROM users WHERE id = $1',
+            [req.userId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                error: 'Пользователь не найден'
+            });
+        }
+        
+        res.json({
+            success: true,
+            user: result.rows[0]
+        });
+        
+    } catch (error) {
+        console.error('Get profile error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Ошибка получения профиля'
+        });
+    }
+});
+
+// ========== СТАТИЧЕСКИЕ ФАЙЛЫ ==========
+app.use(express.static(FRONTEND_PATH));
+
+// ========== ВСЕ ОСТАЛЬНЫЕ ЗАПРОСЫ → index.html ==========
+app.get('*', (req, res) => {
+    res.sendFile(path.join(FRONTEND_PATH, 'index.html'));
+});
+
+// ========== ОБРАБОТКА ОШИБОК ==========
+app.use((err, req, res, next) => {
+    console.error('Server error:', err);
+    res.status(500).json({
+        success: false,
+        error: 'Внутренняя ошибка сервера'
     });
 });
 
-app.delete('/api/admin/users/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    
-    if (id == req.user.id) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Нельзя удалить самого себя' 
-        });
-    }
-    
-    const userIndex = users.findIndex(u => u.id == id);
-    if (userIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Пользователь не найден' 
-        });
-    }
-    
-    users.splice(userIndex, 1);
-    
-    res.json({ 
-        success: true, 
-        message: 'Пользователь удален'
-    });
-});
-
-// ========== API ОБЪЯВЛЕНИЙ ==========
-app.get('/api/announcements', (req, res) => {
-    res.json(announcements);
-});
-
-app.post('/api/announcements', requireAuth, (req, res) => {
-    const { title, content, category, type, pinned, urgent } = req.body;
-    
-    if (!title || !content) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Заполните заголовок и содержание' 
-        });
-    }
-    
-    const newId = announcements.length > 0 ? Math.max(...announcements.map(a => a.id)) + 1 : 1;
-    
-    const newAnnouncement = {
-        id: newId,
-        title,
-        content,
-        category: category || 'all',
-        type: type || 'announcement',
-        author: req.user.full_name || req.user.username,
-        pinned: Boolean(pinned),
-        urgent: Boolean(urgent),
-        created_at: new Date().toISOString()
-    };
-    
-    announcements.push(newAnnouncement);
-    
-    res.json({ 
-        success: true, 
-        announcement: newAnnouncement 
-    });
-});
-
-app.put('/api/announcements/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    const { title, content, category, type, pinned, urgent } = req.body;
-    
-    const annIndex = announcements.findIndex(a => a.id == id);
-    if (annIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Объявление не найдено' 
-        });
-    }
-    
-    announcements[annIndex] = {
-        ...announcements[annIndex],
-        title: title || announcements[annIndex].title,
-        content: content || announcements[annIndex].content,
-        category: category || announcements[annIndex].category,
-        type: type || announcements[annIndex].type,
-        pinned: pinned !== undefined ? Boolean(pinned) : announcements[annIndex].pinned,
-        urgent: urgent !== undefined ? Boolean(urgent) : announcements[annIndex].urgent
-    };
-    
-    res.json({ 
-        success: true, 
-        announcement: announcements[annIndex] 
-    });
-});
-
-app.delete('/api/announcements/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    
-    const annIndex = announcements.findIndex(a => a.id == id);
-    if (annIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Объявление не найдено' 
-        });
-    }
-    
-    announcements.splice(annIndex, 1);
-    
-    res.json({ 
-        success: true, 
-        message: 'Объявление удалено' 
-    });
-});
-
-// ========== API РАСПИСАНИЯ ==========
-app.get('/api/schedules', (req, res) => {
-    res.json(schedules);
-});
-
-app.post('/api/schedules', requireAuth, (req, res) => {
-    const { class_number, class_letter, day_of_week, start_time, end_time, subject, teacher, room } = req.body;
-    
-    if (!class_number || !class_letter || !day_of_week || !start_time || !end_time || !subject || !teacher) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Заполните все обязательные поля' 
-        });
-    }
-    
-    const newId = schedules.length > 0 ? Math.max(...schedules.map(s => s.id)) + 1 : 1;
-    
-    const newSchedule = {
-        id: newId,
-        class_number: parseInt(class_number),
-        class_letter,
-        day_of_week,
-        start_time: start_time.includes(':') ? start_time : start_time + ':00',
-        end_time: end_time.includes(':') ? end_time : end_time + ':00',
-        subject,
-        teacher,
-        room: room || '',
-        created_at: new Date().toISOString()
-    };
-    
-    schedules.push(newSchedule);
-    
-    res.json({ 
-        success: true, 
-        schedule: newSchedule 
-    });
-});
-
-app.put('/api/schedules/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    const { class_number, class_letter, day_of_week, start_time, end_time, subject, teacher, room } = req.body;
-    
-    const scheduleIndex = schedules.findIndex(s => s.id == id);
-    if (scheduleIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Урок не найден' 
-        });
-    }
-    
-    schedules[scheduleIndex] = {
-        ...schedules[scheduleIndex],
-        class_number: class_number || schedules[scheduleIndex].class_number,
-        class_letter: class_letter || schedules[scheduleIndex].class_letter,
-        day_of_week: day_of_week || schedules[scheduleIndex].day_of_week,
-        start_time: start_time || schedules[scheduleIndex].start_time,
-        end_time: end_time || schedules[scheduleIndex].end_time,
-        subject: subject || schedules[scheduleIndex].subject,
-        teacher: teacher || schedules[scheduleIndex].teacher,
-        room: room || schedules[scheduleIndex].room
-    };
-    
-    res.json({ 
-        success: true, 
-        schedule: schedules[scheduleIndex] 
-    });
-});
-
-app.delete('/api/schedules/:id', requireAuth, (req, res) => {
-    const { id } = req.params;
-    
-    const scheduleIndex = schedules.findIndex(s => s.id == id);
-    if (scheduleIndex === -1) {
-        return res.status(404).json({ 
-            success: false, 
-            error: 'Урок не найден' 
-        });
-    }
-    
-    schedules.splice(scheduleIndex, 1);
-    
-    res.json({ 
-        success: true, 
-        message: 'Урок удален' 
-    });
-});
-
-// ========== ДЕБАГ ЭНДПОИНТЫ ==========
-app.get('/api/debug/users', (req, res) => {
-    console.log('🔍 DEBUG: Все пользователи в памяти:', users);
-    
-    res.json({
-        success: true,
-        users_count: users.length,
-        users: users.map(u => ({
-            id: u.id,
-            username: u.username,
-            full_name: u.full_name,
-            role: u.role,
-            created_at: u.created_at,
-            last_login: u.last_login,
-            has_password: !!u.password
-        })),
-        announcements_count: announcements.length,
-        schedules_count: schedules.length
-    });
-});
-
-app.get('/api/debug/token-test', requireAuth, (req, res) => {
-    res.json({
-        success: true,
-        message: 'Токен работает!',
-        user: req.user
-    });
-});
-
-// ========== ОБРАБОТКА 404 ==========
-app.use('*', (req, res) => {
-    if (req.originalUrl.startsWith('/api/')) {
-        res.status(404).json({ 
-            success: false, 
-            error: 'API endpoint не найден' 
-        });
-    } else {
-        res.sendFile(path.join(FRONTEND_PATH, 'index.html'));
-    }
-});
-
-// ========== ЗАПУСК СЕРВЕРА ==========
+// Запуск сервера
 app.listen(PORT, () => {
     console.log(`
 🚀 Сервер запущен: http://localhost:${PORT}
-📁 Обслуживает файлы из: ${FRONTEND_PATH}
-
-📊 Состояние системы:
-   • Пользователи: ${users.length}
-   • Объявления: ${announcements.length}
-   • Уроки: ${schedules.length}
-
-🔐 Админ API защищены авторизацией
-🌐 Открывайте: http://localhost:${PORT}/login.html
-
-📋 Дебаг эндпоинты:
-   • GET /api/debug/users      - Все пользователи (без защиты)
-   • GET /api/debug/token-test - Тест токена (с защитой)
-`);
+📁 Статические файлы из: ${FRONTEND_PATH}
+🐘 PostgreSQL подключен
+    `);
 });
